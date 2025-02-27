@@ -1,0 +1,41 @@
+{
+    "database": {
+        "pacs": {
+            "server": "localhost",
+            "database": "PACS",
+            "trusted_connection": true,
+            "username": "",
+            "password": "********"
+        },
+        "databridge": {
+            "server": "localhost",
+            "database": "DataBridge",
+            "trusted_connection": true,
+            "username": "",
+            "password": "********"
+        }
+    },
+    "import": {
+        "permit": {
+            "default_schema": {},
+            "watch_folder": "C:\\PACS\\Permits\\Import",
+            "archive_folder": "C:\\PACS\\Permits\\Archive"
+        },
+        "personal_property": {
+            "default_schema": {},
+            "watch_folder": "C:\\PACS\\PersonalProperty\\Import",
+            "archive_folder": "C:\\PACS\\PersonalProperty\\Archive"
+        }
+    },
+    "export": {
+        "output_folder": "C:\\PACS\\Export"
+    },
+    "logging": {
+        "level": "INFO",
+        "log_file": "C:\\PACS\\Logs\\databridge.log"
+    },
+    "ui": {
+        "theme": "light",
+        "default_view": "dashboard"
+    }
+}
