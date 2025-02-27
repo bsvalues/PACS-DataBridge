@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data_bridge import __version__
-from data_bridge.cli import main as cli_main
+from data_bridge.cli import cli_main
 from data_bridge.db_setup import main as db_setup_main
 from data_bridge.api import start_api
 
