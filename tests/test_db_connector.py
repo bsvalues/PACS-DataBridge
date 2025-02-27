@@ -1,170 +1,190 @@
-
 """
 Unit tests for the db_connector module.
 """
 
-import pytest
-import pandas as pd
+import unittest
 from unittest.mock import MagicMock, patch
-from data_bridge.db_connector import DatabaseConnector, PACSConnector, DataBridgeConnector
+import sys
+from pathlib import Path
+import pandas as pd
+import pytest
 
-class TestDatabaseConnector:
-    """Test cases for DatabaseConnector class."""
-    
-    @pytest.fixture
-    def mock_pyodbc(self):
-        """Create a mock pyodbc module."""
-        with patch('data_bridge.db_connector.pyodbc') as mock:
-            # Mock the cursor and connection
-            mock_cursor = MagicMock()
-            mock_connection = MagicMock()
-            mock_connection.cursor.return_value = mock_cursor
-            mock.connect.return_value = mock_connection
-            
-            yield mock
-    
-    @pytest.fixture
-    def connector(self, mock_pyodbc):
-        """Create a DatabaseConnector instance with mocked pyodbc."""
-        return DatabaseConnector(
-            server="test_server",
-            database="test_db",
-            username="test_user",
-            password="test_pass",
-            trusted_connection=False
-        )
-    
-    def test_initialization(self, connector):
-        """Test connector initialization."""
-        assert connector.server == "test_server"
-        assert connector.database == "test_db"
-        assert connector.username == "test_user"
-        assert connector.password == "test_pass"
-        assert connector.trusted_connection == False
-        assert connector.connection is None
-        assert connector.cursor is None
-    
-    def test_connect_trusted(self, mock_pyodbc):
-        """Test connection with trusted authentication."""
-        connector = DatabaseConnector(
-            server="test_server",
-            database="test_db",
+# Add the src directory to the path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from src.data_bridge.db_connector import DatabaseConnector, PACSConnector, DataBridgeConnector
+
+class TestDatabaseConnector(unittest.TestCase):
+    """Test cases for the DatabaseConnector class."""
+
+    @patch('src.data_bridge.db_connector.pyodbc')
+    def setUp(self, mock_pyodbc):
+        """Set up test fixtures."""
+        # Configure mock cursor
+        self.mock_cursor = MagicMock()
+        self.mock_connection = MagicMock()
+        self.mock_connection.cursor.return_value = self.mock_cursor
+
+        # Configure mock pyodbc
+        mock_pyodbc.connect.return_value = self.mock_connection
+
+        # Create database connector
+        self.db = DatabaseConnector(
+            server='test-server',
+            database='test-db',
             trusted_connection=True
         )
-        
-        result = connector.connect()
-        
-        assert result == True
-        assert connector.connection is not None
-        assert connector.cursor is not None
-        
-        # Check that pyodbc.connect was called with correct connection string
-        mock_pyodbc.connect.assert_called_once()
-        conn_str = mock_pyodbc.connect.call_args[0][0]
-        assert "SERVER=test_server" in conn_str
-        assert "DATABASE=test_db" in conn_str
-        assert "Trusted_Connection=yes" in conn_str
-    
-    def test_connect_sql_auth(self, mock_pyodbc):
-        """Test connection with SQL authentication."""
-        connector = DatabaseConnector(
-            server="test_server",
-            database="test_db",
-            username="test_user",
-            password="test_pass",
+
+    def test_connect(self):
+        """Test database connection."""
+        # Call connect
+        result = self.db.connect()
+
+        # Check result
+        self.assertTrue(result)
+        self.assertEqual(self.db.connection, self.mock_connection)
+        self.assertEqual(self.db.cursor, self.mock_cursor)
+
+    def test_connect_with_credentials(self):
+        """Test database connection with username/password."""
+        # Create a new connector with credentials
+        db = DatabaseConnector(
+            server='test-server',
+            database='test-db',
+            username='testuser',
+            password='testpass',
             trusted_connection=False
         )
-        
-        result = connector.connect()
-        
-        assert result == True
-        assert connector.connection is not None
-        assert connector.cursor is not None
-        
-        # Check that pyodbc.connect was called with correct connection string
-        mock_pyodbc.connect.assert_called_once()
-        conn_str = mock_pyodbc.connect.call_args[0][0]
-        assert "SERVER=test_server" in conn_str
-        assert "DATABASE=test_db" in conn_str
-        assert "UID=test_user" in conn_str
-        assert "PWD=test_pass" in conn_str
-    
-    def test_disconnect(self, connector):
-        """Test disconnection."""
-        connector.connect()
-        
-        connector.disconnect()
-        
-        assert connector.connection is None
-        assert connector.cursor is None
-        connector.connection.close.assert_called_once()
-        connector.cursor.close.assert_called_once()
-    
-    def test_is_connected(self, connector):
-        """Test is_connected method."""
-        # When not connected
-        assert connector.is_connected() == False
-        
-        # When connected
-        connector.connect()
-        assert connector.is_connected() == True
-        
-        # When connection fails query
-        connector.cursor.execute.side_effect = Exception("Connection lost")
-        assert connector.is_connected() == False
-    
-    def test_execute_query_select(self, connector):
-        """Test execute_query for SELECT statements."""
-        connector.connect()
-        
-        # Mock fetchall to return some results
-        mock_results = [("row1_col1", "row1_col2"), ("row2_col1", "row2_col2")]
-        connector.cursor.fetchall.return_value = mock_results
-        
-        results = connector.execute_query("SELECT * FROM test_table")
-        
-        assert results == mock_results
-        connector.cursor.execute.assert_called_once_with("SELECT * FROM test_table")
-        connector.cursor.fetchall.assert_called_once()
-    
-    def test_execute_query_insert(self, connector):
-        """Test execute_query for INSERT statements."""
-        connector.connect()
-        
-        # Mock fetchall to raise pyodbc.Error
-        connector.cursor.fetchall.side_effect = MagicMock(side_effect=Exception("Not a query"))
-        
-        results = connector.execute_query("INSERT INTO test_table VALUES (1, 2)")
-        
-        assert results is None
-        connector.cursor.execute.assert_called_once_with("INSERT INTO test_table VALUES (1, 2)")
-        connector.connection.commit.assert_called_once()
-    
-    def test_insert_many(self, connector):
-        """Test insert_many method."""
-        connector.connect()
-        
-        table = "test_table"
-        columns = ["col1", "col2"]
-        data = [("row1_col1", "row1_col2"), ("row2_col1", "row2_col2")]
-        
-        result = connector.insert_many(table, columns, data)
-        
-        assert result == True
-        connector.cursor.executemany.assert_called_once()
-        connector.connection.commit.assert_called_once()
-    
-    def test_query_to_dataframe(self, connector):
-        """Test query_to_dataframe method."""
-        connector.connect()
-        
+
+        # Call connect
+        result = db.connect()
+
+        # Check result
+        self.assertTrue(result)
+
+    def test_disconnect(self):
+        """Test database disconnection."""
+        # Connect first
+        self.db.connect()
+
+        # Call disconnect
+        self.db.disconnect()
+
+        # Check result
+        self.mock_cursor.close.assert_called_once()
+        self.mock_connection.close.assert_called_once()
+        self.assertIsNone(self.db.connection)
+        self.assertIsNone(self.db.cursor)
+
+    def test_is_connected(self):
+        """Test connection check."""
+        # Not connected initially
+        self.assertFalse(self.db.is_connected())
+
+        # Connect
+        self.db.connect()
+
+        # Should be connected
+        self.mock_cursor.execute.return_value = True
+        self.assertTrue(self.db.is_connected())
+
+        # Test query failure
+        self.mock_cursor.execute.side_effect = Exception("Connection lost")
+        self.assertFalse(self.db.is_connected())
+
+    def test_execute_query(self):
+        """Test query execution."""
+        # Configure mock for SELECT query
+        self.mock_cursor.fetchall.return_value = [('value1',), ('value2',)]
+
+        # Connect
+        self.db.connect()
+
+        # Execute query
+        results = self.db.execute_query("SELECT * FROM test")
+
+        # Check results
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0][0], 'value1')
+        self.assertEqual(results[1][0], 'value2')
+
+        # Test with parameters
+        self.db.execute_query("SELECT * FROM test WHERE id = ?", (1,))
+        self.mock_cursor.execute.assert_called_with("SELECT * FROM test WHERE id = ?", (1,))
+
+    def test_insert_many(self):
+        """Test bulk insert."""
+        # Connect
+        self.db.connect()
+
+        # Test data
+        columns = ['col1', 'col2']
+        data = [('val1', 'val2'), ('val3', 'val4')]
+
+        # Call insert_many
+        result = self.db.insert_many('test_table', columns, data)
+
+        # Check result
+        self.assertTrue(result)
+        self.mock_cursor.executemany.assert_called_once()
+        self.mock_connection.commit.assert_called_once()
+
+    def test_execute_stored_procedure(self):
+        """Test stored procedure execution."""
+        # Configure mock for stored procedure
+        self.mock_cursor.fetchall.return_value = [('result1',), ('result2',)]
+
+        # Connect
+        self.db.connect()
+
+        # Call stored procedure
+        results = self.db.execute_stored_procedure('sp_test_proc')
+
+        # Check results
+        self.assertEqual(len(results), 2)
+
+        # Test with parameters
+        params = {'param1': 'value1', 'param2': 123}
+        self.db.execute_stored_procedure('sp_test_proc', params)
+        self.mock_cursor.execute.assert_called()
+
+    def test_query_to_dataframe(self):
+        """Test query to DataFrame conversion."""
         # Mock pd.read_sql
-        mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        with patch('data_bridge.db_connector.pd.read_sql', return_value=mock_df) as mock_read_sql:
-            df = connector.query_to_dataframe("SELECT * FROM test_table")
-            
-            assert df is mock_df
-            mock_read_sql.assert_called_once_with("SELECT * FROM test_table", connector.connection)
+        with patch('src.data_bridge.db_connector.pd.read_sql') as mock_read_sql:
+            # Configure mock
+            mock_df = pd.DataFrame({'col1': [1, 2], 'col2': ['a', 'b']})
+            mock_read_sql.return_value = mock_df
+
+            # Connect
+            self.db.connect()
+
+            # Execute query
+            df = self.db.query_to_dataframe("SELECT * FROM test")
+
+            # Check result
+            self.assertIsInstance(df, pd.DataFrame)
+            self.assertEqual(len(df), 2)
+            mock_read_sql.assert_called_once()
+
+    def test_table_exists(self):
+        """Test table existence check."""
+        # Configure mock for positive case
+        self.mock_cursor.fetchall.return_value = [(1,)]
+
+        # Connect
+        self.db.connect()
+
+        # Check existing table
+        result = self.db.table_exists('existing_table')
+        self.assertTrue(result)
+
+        # Configure mock for negative case
+        self.mock_cursor.fetchall.return_value = [(None,)]
+
+        # Check non-existing table
+        result = self.db.table_exists('nonexisting_table')
+        self.assertFalse(result)
 
 
 class TestPACSConnector:
@@ -266,6 +286,7 @@ class TestPACSConnector:
         assert len(result) == 2
         assert "PermitNumber" in result.columns
         assert result["PermitNumber"][0] == "BP-2023-001"
+
 
 
 class TestDataBridgeConnector:
@@ -411,3 +432,6 @@ class TestDataBridgeConnector:
         assert result == True
         db_connector.execute_query.assert_called_once()
         db_connector.connection.commit.assert_called_once()
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,103 +1,136 @@
 
-"""
-Unit tests for the address_matcher module.
-"""
+import unittest
+from unittest.mock import MagicMock, patch
+import sys
+from pathlib import Path
 
-import pytest
-from data_bridge.address_matcher import AddressMatcher
+# Add the src directory to the path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-class TestAddressMatcher:
-    """Test cases for AddressMatcher class."""
+from src.data_bridge.address_matcher import AddressMatcher
+from src.data_bridge.db_connector import DatabaseConnector
+
+class TestAddressMatcher(unittest.TestCase):
+    """Test cases for the AddressMatcher class."""
     
-    @pytest.fixture
-    def matcher(self):
-        """Create an AddressMatcher instance."""
-        return AddressMatcher()
-    
-    def test_normalize_address(self, matcher):
-        """Test address normalization."""
-        # Test basic normalization
-        assert matcher.normalize_address("123 Main St.") == "123 MAIN STREET"
-        assert matcher.normalize_address("456 N. Oak Ave") == "456 NORTH OAK AVENUE"
-        assert matcher.normalize_address("789 SW 1st Blvd, Apt #4") == "789 SOUTHWEST 1ST BOULEVARD APT 4"
+    def setUp(self):
+        """Set up test fixtures."""
+        # Create a mock database connector
+        self.mock_db = MagicMock(spec=DatabaseConnector)
         
-        # Test handling of special characters
-        assert matcher.normalize_address("123-B Main St.") == "123-B MAIN STREET"
-        assert matcher.normalize_address("123 Main St. #5") == "123 MAIN STREET 5"
-        
-        # Test multiple spaces
-        assert matcher.normalize_address("123   Main   Street") == "123 MAIN STREET"
-        
-        # Test empty input
-        assert matcher.normalize_address("") == ""
-        assert matcher.normalize_address(None) == ""
-    
-    def test_parse_address(self, matcher):
-        """Test address parsing."""
-        # Test complete address
-        components = matcher.parse_address("123 N Main St, Anytown, TX 12345")
-        assert components["number"] == "123"
-        assert components["direction"] == "NORTH"
-        assert components["street"] == "MAIN"
-        assert components["street_type"] == "STREET"
-        assert components["city"] == "ANYTOWN"
-        assert components["state"] == "TX"
-        assert components["zip"] == "12345"
-        
-        # Test address with unit
-        components = matcher.parse_address("456 Oak Ave Apt 7B")
-        assert components["number"] == "456"
-        assert components["street"] == "OAK"
-        assert components["street_type"] == "AVENUE"
-        assert components["unit"] == "APT 7B"
-        
-        # Test address with only number and street
-        components = matcher.parse_address("789 Broadway")
-        assert components["number"] == "789"
-        assert components["street"] == "BROADWAY"
-    
-    def test_standardize_address(self, matcher):
-        """Test address standardization."""
-        # Test standard address
-        std_address = matcher.standardize_address("123 n main st")
-        assert std_address == "123 NORTH MAIN STREET"
-        
-        # Test with city, state, zip
-        std_address = matcher.standardize_address("456 oak ave, anytown, tx 12345")
-        assert std_address == "456 OAK AVENUE, ANYTOWN, TX 12345"
-        
-        # Test with unit
-        std_address = matcher.standardize_address("789 e broadway apt 4")
-        assert std_address == "789 EAST BROADWAY APT 4"
-    
-    def test_match_address(self, matcher):
-        """Test address matching."""
-        candidates = [
-            "123 Main St, Anytown, TX 12345",
-            "123 Main Street, Anytown, TX 12345",
-            "123 E Main St, Anytown, TX 12345",
-            "125 Main St, Anytown, TX 12345",
-            "123 Main St, Othertown, TX 12345"
+        # Sample query results
+        self.sample_results = [
+            ('123456', '123 MAIN ST', '123', 'MAIN', 'ST', 'ANYTOWN', 'US', '12345'),
+            ('789012', '123 MAIN STREET', '123', 'MAIN', 'STREET', 'ANYTOWN', 'US', '12345'),
+            ('345678', '123 N MAIN ST', '123', 'N MAIN', 'ST', 'ANYTOWN', 'US', '12345')
         ]
         
+        # Configure mock to return sample results
+        self.mock_db.execute_query.return_value = self.sample_results
+        
+        # Create address matcher with mock database
+        self.matcher = AddressMatcher(self.mock_db)
+    
+    def test_normalize_address(self):
+        """Test address normalization."""
+        # Test basic normalization
+        self.assertEqual(self.matcher._normalize_address('123 Main St'), '123 MAIN ST')
+        
+        # Test abbreviation replacement
+        self.assertEqual(self.matcher._normalize_address('123 Main Street'), '123 MAIN ST')
+        self.assertEqual(self.matcher._normalize_address('123 Main Avenue'), '123 MAIN AVE')
+        
+        # Test directional abbreviation
+        self.assertEqual(self.matcher._normalize_address('123 North Main St'), '123 N MAIN ST')
+        
+        # Test unit/apt removal
+        self.assertEqual(self.matcher._normalize_address('123 Main St, Apt 4B'), '123 MAIN ST')
+        self.assertEqual(self.matcher._normalize_address('123 Main St #101'), '123 MAIN ST')
+        
+        # Test whitespace handling
+        self.assertEqual(self.matcher._normalize_address('  123   Main   St  '), '123 MAIN ST')
+        
+        # Test null handling
+        self.assertEqual(self.matcher._normalize_address(''), '')
+        self.assertEqual(self.matcher._normalize_address(None), '')
+    
+    def test_parse_address(self):
+        """Test address parsing."""
+        # Test basic parsing
+        result = self.matcher._parse_address('123 MAIN ST')
+        self.assertEqual(result['street_number'], '123')
+        self.assertEqual(result['street_name'], 'MAIN')
+        self.assertEqual(result['street_type'], 'ST')
+        
+        # Test without street type
+        result = self.matcher._parse_address('123 MAIN')
+        self.assertEqual(result['street_number'], '123')
+        self.assertEqual(result['street_name'], 'MAIN')
+        self.assertEqual(result['street_type'], '')
+        
+        # Test directional
+        result = self.matcher._parse_address('123 N MAIN ST')
+        self.assertEqual(result['street_number'], '123')
+        self.assertEqual(result['street_name'], 'N MAIN')
+        self.assertEqual(result['street_type'], 'ST')
+    
+    def test_match_address(self):
+        """Test address matching."""
         # Test exact match
-        matches = matcher.match_address("123 Main St, Anytown, TX 12345", candidates)
-        assert len(matches) > 0
-        assert matches[0][0] == "123 Main St, Anytown, TX 12345"
-        assert matches[0][1] == 100.0
+        matches = self.matcher.match_address('123 Main St')
+        self.assertTrue(len(matches) > 0)
+        self.assertEqual(matches[0]['pid'], '123456')
+        self.assertTrue(matches[0]['confidence'] > 90)
         
         # Test close match
-        matches = matcher.match_address("123 Main Street, Anytown, TX 12345", candidates)
-        assert len(matches) > 0
-        assert matches[0][0] in ["123 Main St, Anytown, TX 12345", "123 Main Street, Anytown, TX 12345"]
-        assert matches[0][1] > 90.0
+        matches = self.matcher.match_address('123 Main Street')
+        self.assertTrue(len(matches) > 0)
+        self.assertTrue(any(m['pid'] == '789012' for m in matches))
         
-        # Test different number
-        matches = matcher.match_address("124 Main St, Anytown, TX 12345", candidates)
-        for match in matches:
-            if match[0] == "125 Main St, Anytown, TX 12345":
-                assert match[1] > 80.0  # Should still be a good match
-                
-        # Test filtering by minimum score
-        matches = matcher.match_address("999 Different Rd, Faraway, CA 54321", candidates, min_score=90.0)
-        assert len(matches) == 0  # Should have no matches above 90%
+        # Test with directional
+        matches = self.matcher.match_address('123 North Main St')
+        self.assertTrue(len(matches) > 0)
+        self.assertTrue(any(m['pid'] == '345678' for m in matches))
+        
+        # Test no match
+        self.mock_db.execute_query.return_value = []
+        matches = self.matcher.match_address('999 Nonexistent Rd')
+        self.assertEqual(len(matches), 0)
+    
+    def test_match_address_with_threshold(self):
+        """Test address matching with confidence threshold."""
+        # Set a high threshold
+        self.matcher.set_threshold(95)
+        
+        # Only exact matches should pass
+        matches = self.matcher.match_address('123 Main St', min_confidence=95)
+        self.assertTrue(len(matches) <= 1)
+        
+        # Set a low threshold
+        self.matcher.set_threshold(50)
+        
+        # More matches should pass
+        matches = self.matcher.match_address('123 Main St', min_confidence=50)
+        self.assertTrue(len(matches) > 0)
+    
+    def test_cache(self):
+        """Test address cache functionality."""
+        # First call should hit the database
+        self.matcher.match_address('123 Main St')
+        self.assertEqual(self.mock_db.execute_query.call_count, 1)
+        
+        # Second call should use cache
+        self.matcher.match_address('123 Main St')
+        self.assertEqual(self.mock_db.execute_query.call_count, 1)
+        
+        # Different address should hit database again
+        self.matcher.match_address('456 Oak Ave')
+        self.assertEqual(self.mock_db.execute_query.call_count, 2)
+        
+        # Clear cache and retry first address - should hit database
+        self.matcher.clear_cache()
+        self.matcher.match_address('123 Main St')
+        self.assertEqual(self.mock_db.execute_query.call_count, 3)
+
+if __name__ == '__main__':
+    unittest.main()

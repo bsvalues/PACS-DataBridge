@@ -1,729 +1,316 @@
-"""
-Address Matcher Module
-
-Provides functionality to match and standardize addresses between permit data
-and parcel records in the PACS database.
-"""
-
 import re
 import logging
-from typing import Dict, List, Optional, Any, Tuple, Union
-import pandas as pd
-from difflib import SequenceMatcher
-from dataclasses import dataclass
-from fuzzywuzzy import fuzz, process
+from typing import Dict, List, Optional, Union, Any, Tuple
+from pathlib import Path
 
-from data_bridge.db_connector import PACSConnector
+from thefuzz import fuzz, process
+import pandas as pd
+
+from .db_connector import DatabaseConnector
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-
-@dataclass
-class Address:
-    """Structured representation of an address."""
-    street_number: str = ""
-    street_name: str = ""
-    street_type: str = ""
-    unit_number: str = ""
-    city: str = ""
-    state: str = ""
-    zip_code: str = ""
-    
-    @property
-    def full_address(self) -> str:
-        """Get the full address as a formatted string."""
-        street = f"{self.street_number} {self.street_name}"
-        if self.street_type:
-            street += f" {self.street_type}"
-        
-        unit = f"Unit {self.unit_number}" if self.unit_number else ""
-        
-        city_state_zip = ""
-        if self.city:
-            city_state_zip += self.city
-            if self.state:
-                city_state_zip += f", {self.state}"
-                if self.zip_code:
-                    city_state_zip += f" {self.zip_code}"
-        
-        parts = [part for part in [street, unit, city_state_zip] if part]
-        return ", ".join(parts)
 
 class AddressMatcher:
     """
-    Address matching and standardization for the PACS DataBridge system.
-    Provides functionality to parse, standardize, and match addresses.
+    Address matching service for parcel identification.
+    Uses fuzzy matching to identify parcels based on address strings.
     """
-    
-    # Common street type abbreviations and their standardized forms
-    STREET_TYPES = {
-        "ST": "STREET", "AVE": "AVENUE", "BLVD": "BOULEVARD", "DR": "DRIVE",
-        "RD": "ROAD", "LN": "LANE", "CT": "COURT", "PL": "PLACE", "TER": "TERRACE",
-        "CIR": "CIRCLE", "HWY": "HIGHWAY", "PKWY": "PARKWAY", "WAY": "WAY",
-        "STREET": "STREET", "AVENUE": "AVENUE", "BOULEVARD": "BOULEVARD",
-        "DRIVE": "DRIVE", "ROAD": "ROAD", "LANE": "LANE", "COURT": "COURT",
-        "PLACE": "PLACE", "TERRACE": "TERRACE", "CIRCLE": "CIRCLE",
-        "HIGHWAY": "HIGHWAY", "PARKWAY": "PARKWAY"
-    }
-    
-    # Directional abbreviations and standardizations
-    DIRECTIONS = {
-        "N": "NORTH", "S": "SOUTH", "E": "EAST", "W": "WEST",
-        "NE": "NORTHEAST", "NW": "NORTHWEST", "SE": "SOUTHEAST", "SW": "SOUTHWEST",
-        "NORTH": "NORTH", "SOUTH": "SOUTH", "EAST": "EAST", "WEST": "WEST",
-        "NORTHEAST": "NORTHEAST", "NORTHWEST": "NORTHWEST", 
-        "SOUTHEAST": "SOUTHEAST", "SOUTHWEST": "SOUTHWEST"
-    }
-    
-    def __init__(self, pacs_connector: Optional[PACSConnector] = None):
+
+    def __init__(self, db_connector: Optional[DatabaseConnector] = None):
         """
-        Initialize the AddressMatcher.
-        
+        Initialize address matcher.
+
         Args:
-            pacs_connector: Optional PACSConnector for database lookups
+            db_connector: Optional DatabaseConnector for parcel lookup
         """
-        self.pacs_connector = pacs_connector
-    
-    def parse_address(self, address_str: str) -> Address:
-        """
-        Parse an address string into structured components.
-        
-        Args:
-            address_str: Full address string to parse
-            
-        Returns:
-            Structured Address object
-        """
-        # Initialize Address object
-        address = Address()
-        
-        # Handle None or empty string
-        if not address_str:
-            return address
-        
-        # Clean the address string
-        clean_address = address_str.strip().upper()
-        
-        # Extract zip code
-        zip_pattern = r'(\d{5}(-\d{4})?)'
-        zip_match = re.search(zip_pattern, clean_address)
-        if zip_match:
-            address.zip_code = zip_match.group(1)
-            clean_address = clean_address.replace(zip_match.group(1), "").strip().rstrip(",")
-        
-        # Extract state (2-letter code)
-        state_pattern = r',\s*([A-Z]{2})\s*$'
-        state_match = re.search(state_pattern, clean_address)
-        if state_match:
-            address.state = state_match.group(1)
-            clean_address = clean_address.replace(state_match.group(0), "").strip()
-        
-        # Extract city
-        city_pattern = r',\s*([A-Za-z\s\.]+?)\s*$'
-        city_match = re.search(city_pattern, clean_address)
-        if city_match:
-            address.city = city_match.group(1).strip()
-            clean_address = clean_address.replace(city_match.group(0), "").strip()
-        
-        # Extract unit number
-        unit_patterns = [
-            r'(?:UNIT|APT|APARTMENT|#)\s*([A-Z0-9\-]+)',
-            r'(?:SUITE|STE)\s*([A-Z0-9\-]+)'
-        ]
-        
-        for pattern in unit_patterns:
-            unit_match = re.search(pattern, clean_address)
-            if unit_match:
-                address.unit_number = unit_match.group(1)
-                clean_address = clean_address.replace(unit_match.group(0), "").strip()
-                break
-        
-        # Process street components
-        parts = clean_address.split()
-        
-        # Extract street number
-        if parts and parts[0].isdigit():
-            address.street_number = parts[0]
-            parts = parts[1:]
-        
-        # Look for street type
-        street_type_found = False
-        for i, part in enumerate(parts):
-            if part in self.STREET_TYPES:
-                address.street_type = self.STREET_TYPES[part]
-                address.street_name = " ".join(parts[:i])
-                street_type_found = True
-                break
-        
-        # If no street type found, assume all remaining parts are street name
-        if not street_type_found and parts:
-            address.street_name = " ".join(parts)
-        
-        # Standardize directions in street name
-        for direction, standard in self.DIRECTIONS.items():
-            # Check for direction at start of street name
-            if address.street_name.startswith(direction + " "):
-                address.street_name = standard + address.street_name[len(direction):]
-            
-            # Check for direction at end of street name
-            if address.street_name.endswith(" " + direction):
-                address.street_name = address.street_name[:-len(direction)] + standard
-        
-        return address
-    
-    def standardize_address(self, address: Union[str, Address]) -> Address:
-        """
-        Standardize an address by parsing and normalizing its components.
-        
-        Args:
-            address: Address string or Address object to standardize
-            
-        Returns:
-            Standardized Address object
-        """
-        # Parse if string, otherwise use the provided Address object
-        if isinstance(address, str):
-            parsed_address = self.parse_address(address)
-        else:
-            parsed_address = address
-        
-        # Standardize the address components
-        standardized = Address(
-            street_number=parsed_address.street_number,
-            street_name=parsed_address.street_name.upper(),
-            street_type=parsed_address.street_type.upper() if parsed_address.street_type else "",
-            unit_number=parsed_address.unit_number.upper() if parsed_address.unit_number else "",
-            city=parsed_address.city.upper() if parsed_address.city else "",
-            state=parsed_address.state.upper() if parsed_address.state else "",
-            zip_code=parsed_address.zip_code
-        )
-        
-        # Standardize directionals in street name
-        for direction, standard in self.DIRECTIONS.items():
-            direction_pattern = rf'\\b{direction}\\b'
-            standardized.street_name = re.sub(
-                direction_pattern, 
-                standard, 
-                standardized.street_name
-            )
-        
-        return standardized
-    
-    def match_address_to_parcel(
-        self, 
-        address: Union[str, Address], 
-        min_confidence: float = 70.0
+        self.db_connector = db_connector
+        self.address_cache = {}
+        self.threshold = 70.0  # Default threshold for fuzzy matching (0-100)
+
+    def match_address(
+        self,
+        address: str,
+        min_confidence: float = 70.0,
+        max_results: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Match an address to parcels in the PACS database.
-        
+        Match an address to parcels.
+
         Args:
-            address: Address string or Address object to match
-            min_confidence: Minimum confidence score (0-100) for matches
-            
+            address: Address string to match
+            min_confidence: Minimum confidence threshold (0-100)
+            max_results: Maximum number of results to return
+
         Returns:
             List of matching parcels with confidence scores
         """
-        if not self.pacs_connector:
-            logger.error("No PACS connector provided for address matching")
+        if not address or not address.strip():
             return []
-        
-        # Standardize the address
-        if isinstance(address, str):
-            std_address = self.standardize_address(address)
-            address_str = address
+
+        # Normalize address
+        normalized_address = self._normalize_address(address)
+
+        # Check cache first
+        if normalized_address in self.address_cache:
+            logger.debug(f"Address cache hit for {normalized_address}")
+            return self.address_cache[normalized_address]
+
+        # Look up in database if available
+        if self.db_connector:
+            # Query database for parcels
+            parcel_matches = self._lookup_parcels_by_address(normalized_address, min_confidence, max_results)
+
+            # Cache the results
+            self.address_cache[normalized_address] = parcel_matches
+
+            return parcel_matches
         else:
-            std_address = self.standardize_address(address)
-            address_str = address.full_address
-        
-        # Get potential matches from database
-        potential_parcels = self.pacs_connector.get_parcel_by_address(
-            f"{std_address.street_number} {std_address.street_name}"
-        )
-        
-        if not potential_parcels:
+            logger.warning("No database connector available for address matching")
             return []
-        
-        # Score each potential match
-        scored_matches = []
-        for parcel in potential_parcels:
-            # Create standardized address from parcel data
-            parcel_address = Address(
-                street_number=str(parcel.get('street_number', '')),
-                street_name=parcel.get('street_name', ''),
-                city=parcel.get('city', ''),
-                state=parcel.get('state', ''),
-                zip_code=parcel.get('zip', '')
-            )
-            
-            # Calculate match score
-            score = self._calculate_address_match_score(std_address, parcel_address)
-            
-            # Add to results if above threshold
-            if score >= min_confidence:
-                match = {
-                    'parcel_id': parcel.get('pid', ''),
-                    'parcel_address': parcel.get('full_address', ''),
-                    'confidence': score,
-                    'input_address': address_str
-                }
-                scored_matches.append(match)
-        
-        # Sort by confidence score
-        scored_matches.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        return scored_matches
-    
-    def _calculate_address_match_score(self, address1: Address, address2: Address) -> float:
-        """
-        Calculate a match score between two addresses.
-        
-        Args:
-            address1: First address to compare
-            address2: Second address to compare
-            
-        Returns:
-            Match confidence score (0-100)
-        """
-        # Component weights
-        weights = {
-            'street_number': 40,  # Most important for matching
-            'street_name': 35,
-            'street_type': 5,
-            'unit_number': 10,
-            'city': 5,
-            'state': 3,
-            'zip_code': 2
-        }
-        
-        total_weight = sum(weights.values())
-        weighted_score = 0
-        
-        # Compare street number (exact match only)
-        if address1.street_number == address2.street_number:
-            weighted_score += weights['street_number']
-        
-        # Compare street name (fuzzy match)
-        street_name_score = fuzz.token_sort_ratio(address1.street_name, address2.street_name)
-        weighted_score += (street_name_score / 100) * weights['street_name']
-        
-        # Compare street type
-        if address1.street_type == address2.street_type:
-            weighted_score += weights['street_type']
-        
-        # Compare unit number (if both have it)
-        if address1.unit_number and address2.unit_number:
-            if address1.unit_number == address2.unit_number:
-                weighted_score += weights['unit_number']
-        elif not address1.unit_number and not address2.unit_number:
-            weighted_score += weights['unit_number']  # Both have no unit number
-        
-        # Compare city
-        if address1.city and address2.city:
-            city_score = fuzz.ratio(address1.city, address2.city)
-            weighted_score += (city_score / 100) * weights['city']
-        
-        # Compare state
-        if address1.state == address2.state:
-            weighted_score += weights['state']
-        
-        # Compare zip code
-        if address1.zip_code == address2.zip_code:
-            weighted_score += weights['zip_code']
-        
-        # Calculate final score (0-100)
-        final_score = (weighted_score / total_weight) * 100
-        
-        return final_score
 
-
-# Example usage
-if __name__ == "__main__":
-    # Create an AddressMatcher (without database connector for demo purposes)
-    matcher = AddressMatcher()
-    
-    # Test address parsing
-    test_address = "123 N Main St, Apt 4B, Springfield, WA 98123"
-    parsed = matcher.parse_address(test_address)
-    print(f"Parsed address: {parsed}")
-    print(f"Full address: {parsed.full_address}")
-    
-    # Test address standardization
-    standardized = matcher.standardize_address(test_address)
-    print(f"Standardized address: {standardized}")
-    print(f"Full standardized address: {standardized.full_address}")
-    
-    # Note: To test matching with the database, a PACSConnector would be needed
-"""
-Address matching and standardization module.
-"""
-
-import re
-import difflib
-from typing import Dict, List, Optional, Union, Any, Tuple
-import logging
-from thefuzz import fuzz, process
-
-logger = logging.getLogger(__name__)
-
-class AddressMatcher:
-    """
-    Address matching and standardization service.
-    Provides functionality for address normalization, standardization, and matching.
-    """
-    
-    def __init__(self, db_connector = None):
+    def _normalize_address(self, address: str) -> str:
         """
-        Initialize address matcher.
-        
-        Args:
-            db_connector: Optional database connector for parcel lookups
-        """
-        self.db_connector = db_connector
-        
-        # Common abbreviations for street types
-        self.street_types = {
-            'STREET': ['ST', 'STREET'],
-            'AVENUE': ['AVE', 'AVENUE', 'AV'],
-            'BOULEVARD': ['BLVD', 'BOULEVARD', 'BLV'],
-            'DRIVE': ['DR', 'DRIVE', 'DRV'],
-            'ROAD': ['RD', 'ROAD'],
-            'LANE': ['LN', 'LANE'],
-            'PLACE': ['PL', 'PLACE'],
-            'COURT': ['CT', 'COURT'],
-            'CIRCLE': ['CIR', 'CIRCLE'],
-            'HIGHWAY': ['HWY', 'HIGHWAY'],
-            'PARKWAY': ['PKWY', 'PARKWAY', 'PKY'],
-            'TERRACE': ['TER', 'TERRACE'],
-            'WAY': ['WAY'],
-            'TRAIL': ['TRL', 'TRAIL'],
-            'LOOP': ['LOOP', 'LP'],
-            'SQUARE': ['SQ', 'SQUARE']
-        }
-        
-        # Direction abbreviations
-        self.directions = {
-            'NORTH': ['N', 'NORTH'],
-            'SOUTH': ['S', 'SOUTH'],
-            'EAST': ['E', 'EAST'],
-            'WEST': ['W', 'WEST'],
-            'NORTHEAST': ['NE', 'NORTHEAST'],
-            'NORTHWEST': ['NW', 'NORTHWEST'],
-            'SOUTHEAST': ['SE', 'SOUTHEAST'],
-            'SOUTHWEST': ['SW', 'SOUTHWEST']
-        }
-        
-        # Address component patterns
-        self.number_pattern = r'^(\d+(?:-\d+)?)'  # 123 or 123-456
-        self.direction_pattern = r'\b(' + '|'.join(d for dirs in self.directions.values() for d in dirs) + r')\b'
-        self.street_type_pattern = r'\b(' + '|'.join(t for types in self.street_types.values() for t in types) + r')\b'
-        self.unit_pattern = r'\b(APT|UNIT|STE|SUITE|#)\s*([A-Za-z0-9-]+)'
-    
-    def normalize_address(self, address: str) -> str:
-        """
-        Normalize address string by removing special characters and extra spaces.
-        
+        Normalize address for consistent matching.
+
         Args:
             address: Raw address string
-            
+
         Returns:
             Normalized address string
         """
         if not address:
-            return ''
-        
+            return ""
+
         # Convert to uppercase
         address = address.upper()
-        
+
+        # Remove extra whitespace
+        address = re.sub(r'\s+', ' ', address.strip())
+
+        # Replace common abbreviations
+        abbrev_map = {
+            r'\bAVENUE\b': 'AVE',
+            r'\bAVE\b': 'AVE',
+            r'\bBOULEVARD\b': 'BLVD',
+            r'\bBLVD\b': 'BLVD',
+            r'\bCIRCLE\b': 'CIR',
+            r'\bCIR\b': 'CIR',
+            r'\bCOURT\b': 'CT',
+            r'\bCT\b': 'CT',
+            r'\bDRIVE\b': 'DR',
+            r'\bDR\b': 'DR',
+            r'\bEXPRESSWAY\b': 'EXPY',
+            r'\bEXPY\b': 'EXPY',
+            r'\bHIGHWAY\b': 'HWY',
+            r'\bHWY\b': 'HWY',
+            r'\bLANE\b': 'LN',
+            r'\bLN\b': 'LN',
+            r'\bPARKWAY\b': 'PKWY',
+            r'\bPKWY\b': 'PKWY',
+            r'\bPLACE\b': 'PL',
+            r'\bPL\b': 'PL',
+            r'\bROAD\b': 'RD',
+            r'\bRD\b': 'RD',
+            r'\bSQUARE\b': 'SQ',
+            r'\bSQ\b': 'SQ',
+            r'\bSTREET\b': 'ST',
+            r'\bST\b': 'ST',
+            r'\bTERRACE\b': 'TER',
+            r'\bTER\b': 'TER',
+            r'\bTRAIL\b': 'TRL',
+            r'\bTRL\b': 'TRL',
+            r'\bWAY\b': 'WAY',
+
+            # Directionals
+            r'\bNORTH\b': 'N',
+            r'\bSOUTH\b': 'S',
+            r'\bEAST\b': 'E',
+            r'\bWEST\b': 'W',
+            r'\bNORTHEAST\b': 'NE',
+            r'\bNORTHWEST\b': 'NW',
+            r'\bSOUTHEAST\b': 'SE',
+            r'\bSOUTHWEST\b': 'SW'
+        }
+
+        for pattern, replacement in abbrev_map.items():
+            address = re.sub(pattern, replacement, address)
+
+        # Remove common noise tokens
+        noise_patterns = [
+            r'\bUNIT\s+\w+\b',
+            r'\bAPT\s+\w+\b',
+            r'\bBUILDING\s+\w+\b',
+            r'\bFLOOR\s+\w+\b',
+            r'#\w+',
+            r',.*'  # Remove everything after a comma
+        ]
+
+        for pattern in noise_patterns:
+            address = re.sub(pattern, '', address)
+
         # Remove special characters
-        address = re.sub(r'[^\w\s,.-]', '', address)
-        
-        # Replace multiple spaces with single space
-        address = re.sub(r'\s+', ' ', address)
-        
-        # Standardize directions
-        for full, abbrevs in self.directions.items():
-            for abbrev in abbrevs:
-                pattern = r'\b' + re.escape(abbrev) + r'\b'
-                address = re.sub(pattern, full, address)
-        
-        # Standardize street types
-        for full, abbrevs in self.street_types.items():
-            for abbrev in abbrevs:
-                pattern = r'\b' + re.escape(abbrev) + r'\b'
-                address = re.sub(pattern, full, address)
-        
-        # Trim leading/trailing spaces
-        address = address.strip()
-        
+        address = re.sub(r'[^\w\s]', '', address)
+
+        # Remove extra whitespace again
+        address = re.sub(r'\s+', ' ', address.strip())
+
         return address
-    
-    def parse_address(self, address: str) -> Dict[str, str]:
+
+    def _lookup_parcels_by_address(
+        self,
+        address: str,
+        min_confidence: float,
+        max_results: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Look up parcels by address in the database.
+
+        Args:
+            address: Normalized address string
+            min_confidence: Minimum confidence threshold
+            max_results: Maximum number of results
+
+        Returns:
+            List of matching parcels with confidence scores
+        """
+        try:
+            if not self.db_connector:
+                return []
+
+            # Extract components for more targeted search
+            address_parts = self._parse_address(address)
+            street_number = address_parts.get('street_number', '')
+            street_name = address_parts.get('street_name', '')
+
+            # Query database for potential matches
+            # This query will depend on the specific database schema
+            query = """
+            SELECT
+                pid,
+                situs_address AS full_address,
+                street_number,
+                street_name,
+                street_type,
+                city,
+                state,
+                zip_code
+            FROM
+                parcel
+            WHERE
+                1=1
+            """
+
+            params = []
+
+            # Add filters if we have specific components
+            if street_number:
+                query += " AND street_number = ?"
+                params.append(street_number)
+
+            if street_name:
+                # Use LIKE for partial matching of street name
+                query += " AND street_name LIKE ?"
+                params.append(f"%{street_name}%")
+
+            # Limit results for performance
+            query += " ORDER BY pid LIMIT 100"
+
+            # Execute query
+            results = self.db_connector.execute_query(query, tuple(params))
+
+            if not results:
+                logger.debug(f"No database matches found for address: {address}")
+                return []
+
+            # Convert to list of dictionaries
+            parcels = []
+            for row in results:
+                parcel = {
+                    'pid': row[0],
+                    'full_address': row[1],
+                    'street_number': row[2],
+                    'street_name': row[3],
+                    'street_type': row[4],
+                    'city': row[5],
+                    'state': row[6],
+                    'zip_code': row[7]
+                }
+                parcels.append(parcel)
+
+            # Perform fuzzy matching
+            matches = []
+            for parcel in parcels:
+                # Normalize database address for comparison
+                db_address = self._normalize_address(parcel['full_address'])
+
+                # Calculate fuzzy match score
+                score = fuzz.token_sort_ratio(address, db_address)
+
+                if score >= min_confidence:
+                    match = parcel.copy()
+                    match['confidence'] = score
+                    matches.append(match)
+
+            # Sort by confidence (descending)
+            matches = sorted(matches, key=lambda x: x['confidence'], reverse=True)
+
+            # Limit results
+            matches = matches[:max_results]
+
+            logger.debug(f"Found {len(matches)} matches for address: {address}")
+            return matches
+
+        except Exception as e:
+            logger.error(f"Error looking up parcels by address: {str(e)}")
+            return []
+
+    def _parse_address(self, address: str) -> Dict[str, str]:
         """
         Parse address into components.
-        
+
         Args:
-            address: Address string
-            
+            address: Normalized address string
+
         Returns:
             Dictionary of address components
         """
-        result = {
-            'number': '',
-            'street': '',
+        components = {
+            'street_number': '',
+            'street_name': '',
             'street_type': '',
-            'direction': '',
-            'unit': '',
             'city': '',
             'state': '',
-            'zip': ''
+            'zip_code': ''
         }
-        
-        if not address:
-            return result
-        
-        # Normalize address
-        address = self.normalize_address(address)
-        
-        # Split address into parts (address, city, state, zip)
-        address_parts = address.split(',')
-        
-        if len(address_parts) >= 1:
-            # Parse street address
-            street_address = address_parts[0].strip()
-            
-            # Extract number
-            number_match = re.search(self.number_pattern, street_address)
-            if number_match:
-                result['number'] = number_match.group(1)
-                street_address = street_address[len(number_match.group(0)):].strip()
-            
-            # Extract direction
-            direction_match = re.search(self.direction_pattern, street_address)
-            if direction_match:
-                dir_text = direction_match.group(1)
-                for full, abbrevs in self.directions.items():
-                    if dir_text in abbrevs:
-                        result['direction'] = full
-                        break
-                street_address = re.sub(self.direction_pattern, '', street_address, count=1).strip()
-            
-            # Extract street type
-            street_type_match = re.search(self.street_type_pattern, street_address)
-            if street_type_match:
-                type_text = street_type_match.group(1)
-                for full, abbrevs in self.street_types.items():
-                    if type_text in abbrevs:
-                        result['street_type'] = full
-                        break
-                street_address = re.sub(self.street_type_pattern, '', street_address, count=1).strip()
-            
-            # Extract unit
-            unit_match = re.search(self.unit_pattern, street_address)
-            if unit_match:
-                result['unit'] = unit_match.group(1) + ' ' + unit_match.group(2)
-                street_address = re.sub(self.unit_pattern, '', street_address, count=1).strip()
-            
-            # Remaining text is street name
-            result['street'] = street_address
-        
-        # Extract city, state, zip if available
-        if len(address_parts) >= 2:
-            result['city'] = address_parts[1].strip()
-        
-        if len(address_parts) >= 3:
-            state_zip = address_parts[2].strip().split()
-            if len(state_zip) >= 1:
-                result['state'] = state_zip[0]
-            if len(state_zip) >= 2:
-                result['zip'] = state_zip[1]
-        
-        return result
-    
-    def standardize_address(self, address: str) -> str:
+
+        # Simple parsing - extract street number and name
+        match = re.match(r'^(\d+)\s+(.+)$', address)
+        if match:
+            components['street_number'] = match.group(1)
+            components['street_name'] = match.group(2)
+
+            # Try to extract street type
+            name_parts = components['street_name'].split()
+            if len(name_parts) > 1 and name_parts[-1] in ['AVE', 'BLVD', 'CIR', 'CT', 'DR', 'EXPY', 'HWY', 'LN', 'PKWY', 'PL', 'RD', 'SQ', 'ST', 'TER', 'TRL', 'WAY']:
+                components['street_type'] = name_parts[-1]
+                components['street_name'] = ' '.join(name_parts[:-1])
+
+        return components
+
+    def clear_cache(self) -> None:
+        """Clear the address cache."""
+        self.address_cache = {}
+        logger.debug("Address cache cleared")
+
+    def set_threshold(self, threshold: float) -> None:
         """
-        Standardize address to a consistent format.
-        
+        Set the minimum confidence threshold.
+
         Args:
-            address: Raw address string
-            
-        Returns:
-            Standardized address string
+            threshold: Threshold value (0-100)
         """
-        # Parse address into components
-        components = self.parse_address(address)
-        
-        # Build standardized address
-        street_address = components['number']
-        
-        if components['direction']:
-            street_address += ' ' + components['direction']
-        
-        street_address += ' ' + components['street']
-        
-        if components['street_type']:
-            street_address += ' ' + components['street_type']
-        
-        if components['unit']:
-            street_address += ' ' + components['unit']
-        
-        # Add city, state, zip if available
-        if components['city']:
-            street_address += ', ' + components['city']
-            
-            if components['state']:
-                street_address += ', ' + components['state']
-                
-                if components['zip']:
-                    street_address += ' ' + components['zip']
-        
-        return street_address
-    
-    def match_address(self, address: str, candidates: List[str], min_score: float = 70.0) -> List[Tuple[str, float]]:
-        """
-        Match address against a list of candidate addresses.
-        
-        Args:
-            address: Address to match
-            candidates: List of candidate addresses
-            min_score: Minimum score threshold (0-100)
-            
-        Returns:
-            List of (matched_address, score) tuples above the threshold
-        """
-        if not address or not candidates:
-            return []
-        
-        # Normalize input address
-        address = self.normalize_address(address)
-        
-        # Normalize candidate addresses
-        normalized_candidates = [self.normalize_address(c) for c in candidates]
-        
-        # Use fuzzy matching to find best matches
-        matches = process.extract(address, normalized_candidates, scorer=fuzz.token_sort_ratio, limit=len(candidates))
-        
-        # Filter by minimum score and match back to original addresses
-        result = []
-        for i, (_, score) in enumerate(matches):
-            if score >= min_score:
-                result.append((candidates[i], score))
-        
-        # Sort by score (highest first)
-        result.sort(key=lambda x: x[1], reverse=True)
-        
-        return result
-    
-    def find_parcel_by_address(self, address: str, min_confidence: float = 70.0) -> List[Dict[str, Any]]:
-        """
-        Find parcels by address using database.
-        
-        Args:
-            address: Address to search for
-            min_confidence: Minimum confidence score
-            
-        Returns:
-            List of matched parcels with confidence scores
-        """
-        if not self.db_connector:
-            logger.warning("No database connector available for parcel lookup")
-            return []
-        
-        try:
-            # Normalize input address
-            address = self.normalize_address(address)
-            
-            # Query database for potential matches
-            query = """
-            SELECT TOP 20
-                p.ParcelID,
-                p.ParcelNumber,
-                p.SitusAddress,
-                p.SitusCity,
-                p.SitusState,
-                p.SitusZip,
-                o.OwnerName
-            FROM 
-                Parcels p
-                LEFT JOIN ParcelOwners o ON p.ParcelID = o.ParcelID AND o.IsPrimary = 1
-            """
-            
-            # Add filtering conditions to narrow search
-            components = self.parse_address(address)
-            where_clauses = []
-            params = []
-            
-            if components['number']:
-                where_clauses.append("p.SitusAddress LIKE ?")
-                params.append(f"{components['number']}%")
-            
-            if components['street'] and len(components['street']) > 2:
-                where_clauses.append("p.SitusAddress LIKE ?")
-                params.append(f"%{components['street']}%")
-            
-            if components['city']:
-                where_clauses.append("p.SitusCity LIKE ?")
-                params.append(f"%{components['city']}%")
-            
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-            else:
-                # If no specific filters, use a generic address match
-                query += " WHERE p.SitusAddress LIKE ?"
-                params.append(f"%{address}%")
-            
-            # Execute query
-            results = self.db_connector.execute_query(query, tuple(params))
-            
-            if not results:
-                return []
-            
-            # Prepare candidate addresses
-            candidates = []
-            parcels = []
-            
-            for row in results:
-                parcel_id, parcel_number, situs_address, city, state, zip_code, owner_name = row
-                
-                # Construct full address for matching
-                full_address = situs_address
-                if city:
-                    full_address += f", {city}"
-                if state:
-                    full_address += f", {state}"
-                if zip_code:
-                    full_address += f" {zip_code}"
-                
-                candidates.append(full_address)
-                parcels.append({
-                    'parcel_id': parcel_id,
-                    'parcel_number': parcel_number,
-                    'address': situs_address,
-                    'city': city,
-                    'state': state,
-                    'zip': zip_code,
-                    'owner_name': owner_name
-                })
-            
-            # Match against candidates
-            matches = self.match_address(address, candidates, min_confidence)
-            
-            # Map matches back to parcels with confidence scores
-            result = []
-            for i, (_, score) in enumerate(matches):
-                parcel = parcels[i]
-                parcel['confidence'] = score
-                result.append(parcel)
-            
-            # Sort by confidence score (highest first)
-            result.sort(key=lambda x: x['confidence'], reverse=True)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error finding parcels by address: {str(e)}")
-            return []
+        if 0 <= threshold <= 100:
+            self.threshold = threshold
+        else:
+            logger.warning(f"Invalid threshold value: {threshold}. Must be between 0 and 100.")
