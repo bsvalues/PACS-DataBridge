@@ -377,3 +377,441 @@ def main():
 
 if __name__ == "__main__":
     main()
+"""
+Command-line interface for PACS DataBridge.
+"""
+
+import os
+import sys
+import argparse
+from pathlib import Path
+from typing import List, Optional
+import logging
+
+from data_bridge.permit_parser import PermitParser
+from data_bridge.personal_property_parser import PersonalPropertyParser
+from data_bridge.db_connector import PACSConnector, DataBridgeConnector
+from data_bridge.config_manager import ConfigManager
+from data_bridge.db_setup import DatabaseSetup
+from data_bridge.address_matcher import AddressMatcher
+
+logger = logging.getLogger(__name__)
+
+def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> None:
+    """
+    Set up logging configuration.
+    
+    Args:
+        level: Logging level
+        log_file: Optional log file path
+    """
+    numeric_level = getattr(logging, level.upper(), None)
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(numeric_level)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(numeric_level)
+    console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+    
+    # File handler if log file specified
+    if log_file:
+        try:
+            # Create directory if it doesn't exist
+            log_path = Path(log_file)
+            os.makedirs(log_path.parent, exist_ok=True)
+            
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(numeric_level)
+            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            root_logger.addHandler(file_handler)
+        except Exception as e:
+            logger.error(f"Failed to set up file logging: {str(e)}")
+
+
+def import_permits(args: argparse.Namespace, config: ConfigManager) -> int:
+    """
+    Import permits from file.
+    
+    Args:
+        args: Command-line arguments
+        config: Configuration manager
+    
+    Returns:
+        Exit code
+    """
+    try:
+        # Get file path
+        file_path = args.file
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return 1
+        
+        logger.info(f"Importing permits from {file_path}")
+        
+        # Parse permits
+        parser = PermitParser()
+        permits_df = parser.parse_file(file_path)
+        
+        if permits_df is None or len(permits_df) == 0:
+            logger.error("No permits found in file")
+            return 1
+        
+        logger.info(f"Found {len(permits_df)} permits")
+        
+        # Connect to database if requested
+        if args.save_to_db:
+            # Get database configuration
+            db_config = config.get('database', 'databridge')
+            if not db_config:
+                logger.error("No database configuration found")
+                return 1
+            
+            # Connect to database
+            db = DataBridgeConnector(
+                server=db_config.get('server', 'localhost'),
+                database=db_config.get('database', 'DataBridge'),
+                username=db_config.get('username', ''),
+                password=db_config.get('password', ''),
+                trusted_connection=db_config.get('trusted_connection', True)
+            )
+            
+            if not db.connect():
+                logger.error("Failed to connect to database")
+                return 1
+            
+            # Log import
+            import_log_id = db.log_import(
+                import_type='PERMIT',
+                file_name=os.path.basename(file_path),
+                record_count=len(permits_df),
+                success_count=len(permits_df),
+                error_count=0,
+                notes=f"Imported from {file_path}"
+            )
+            
+            logger.info(f"Created import log record {import_log_id}")
+            
+            # TODO: Save permits to database
+            
+            db.disconnect()
+        
+        # Export to CSV if requested
+        if args.output:
+            output_path = args.output
+            parser.export_to_csv(permits_df, output_path)
+            logger.info(f"Exported permits to {output_path}")
+        
+        # Display summary
+        print(f"\nImport Summary:")
+        print(f"  Total records: {len(permits_df)}")
+        print(f"  Successful: {len(permits_df)}")
+        print(f"  Errors: 0")
+        
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error importing permits: {str(e)}")
+        return 1
+
+
+def import_personal_property(args: argparse.Namespace, config: ConfigManager) -> int:
+    """
+    Import personal property from file.
+    
+    Args:
+        args: Command-line arguments
+        config: Configuration manager
+    
+    Returns:
+        Exit code
+    """
+    try:
+        # Get file path
+        file_path = args.file
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return 1
+        
+        logger.info(f"Importing personal property from {file_path}")
+        
+        # Parse personal property
+        parser = PersonalPropertyParser()
+        pp_df = parser.parse_file(file_path)
+        
+        if pp_df is None or len(pp_df) == 0:
+            logger.error("No personal property found in file")
+            return 1
+        
+        logger.info(f"Found {len(pp_df)} personal property accounts")
+        
+        # Connect to database if requested
+        if args.save_to_db:
+            # Get database configuration
+            db_config = config.get('database', 'databridge')
+            if not db_config:
+                logger.error("No database configuration found")
+                return 1
+            
+            # Connect to database
+            db = DataBridgeConnector(
+                server=db_config.get('server', 'localhost'),
+                database=db_config.get('database', 'DataBridge'),
+                username=db_config.get('username', ''),
+                password=db_config.get('password', ''),
+                trusted_connection=db_config.get('trusted_connection', True)
+            )
+            
+            if not db.connect():
+                logger.error("Failed to connect to database")
+                return 1
+            
+            # Log import
+            import_log_id = db.log_import(
+                import_type='PERSONAL_PROPERTY',
+                file_name=os.path.basename(file_path),
+                record_count=len(pp_df),
+                success_count=len(pp_df),
+                error_count=0,
+                notes=f"Imported from {file_path}"
+            )
+            
+            logger.info(f"Created import log record {import_log_id}")
+            
+            # TODO: Save personal property to database
+            
+            db.disconnect()
+        
+        # Export to CSV if requested
+        if args.output:
+            output_path = args.output
+            parser.export_to_csv(pp_df, output_path)
+            logger.info(f"Exported personal property to {output_path}")
+        
+        # Display summary
+        print(f"\nImport Summary:")
+        print(f"  Total records: {len(pp_df)}")
+        print(f"  Successful: {len(pp_df)}")
+        print(f"  Errors: 0")
+        
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error importing personal property: {str(e)}")
+        return 1
+
+
+def lookup_parcel(args: argparse.Namespace, config: ConfigManager) -> int:
+    """
+    Look up parcel by address or parcel number.
+    
+    Args:
+        args: Command-line arguments
+        config: Configuration manager
+    
+    Returns:
+        Exit code
+    """
+    try:
+        # Get address or parcel number
+        if args.address:
+            address = args.address
+            method = "address"
+            search_term = address
+        elif args.parcel:
+            parcel_number = args.parcel
+            method = "parcel number"
+            search_term = parcel_number
+        else:
+            logger.error("No address or parcel number specified")
+            return 1
+        
+        logger.info(f"Looking up parcel by {method}: {search_term}")
+        
+        # Get database configuration
+        db_config = config.get('database', 'pacs')
+        if not db_config:
+            logger.error("No PACS database configuration found")
+            return 1
+        
+        # Connect to database
+        db = PACSConnector(
+            server=db_config.get('server', 'localhost'),
+            database=db_config.get('database', 'PACS'),
+            username=db_config.get('username', ''),
+            password=db_config.get('password', ''),
+            trusted_connection=db_config.get('trusted_connection', True)
+        )
+        
+        if not db.connect():
+            logger.error("Failed to connect to database")
+            return 1
+        
+        # Look up parcel
+        if method == "address":
+            # Use address matcher for address lookup
+            matcher = AddressMatcher(db)
+            parcels = matcher.find_parcel_by_address(address, args.min_confidence)
+            
+            if not parcels:
+                print(f"No parcels found for address: {address}")
+                return 1
+            
+            # Display results
+            print(f"\nFound {len(parcels)} matching parcels:")
+            for i, parcel in enumerate(parcels):
+                print(f"\nMatch #{i+1} (Confidence: {parcel['confidence']:.1f}%):")
+                print(f"  Parcel Number: {parcel['parcel_number']}")
+                print(f"  Address: {parcel['address']}")
+                if parcel['city'] or parcel['state'] or parcel['zip']:
+                    print(f"  {parcel['city']}, {parcel['state']} {parcel['zip']}")
+                print(f"  Owner: {parcel['owner_name']}")
+        else:
+            # Use direct lookup for parcel number
+            parcel = db.get_parcel_by_number(parcel_number)
+            
+            if not parcel:
+                print(f"No parcel found for parcel number: {parcel_number}")
+                return 1
+            
+            # Display result
+            print(f"\nFound parcel:")
+            print(f"  Parcel Number: {parcel['parcel_number']}")
+            print(f"  Address: {parcel['address']}")
+            if parcel['city'] or parcel['state'] or parcel['zip']:
+                print(f"  {parcel['city']}, {parcel['state']} {parcel['zip']}")
+            print(f"  Owner: {parcel['owner_name']}")
+        
+        db.disconnect()
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error looking up parcel: {str(e)}")
+        return 1
+
+
+def setup_database(args: argparse.Namespace, config: ConfigManager) -> int:
+    """
+    Set up the database.
+    
+    Args:
+        args: Command-line arguments
+        config: Configuration manager
+    
+    Returns:
+        Exit code
+    """
+    try:
+        logger.info("Setting up DataBridge database")
+        
+        # Create database setup instance
+        db_setup = DatabaseSetup(config)
+        
+        # Set up database
+        success = db_setup.setup_database()
+        
+        if success:
+            logger.info("Database setup completed successfully")
+            return 0
+        else:
+            logger.error("Database setup failed")
+            return 1
+        
+    except Exception as e:
+        logger.error(f"Error setting up database: {str(e)}")
+        return 1
+
+
+def main(args: Optional[List[str]] = None) -> int:
+    """
+    Main entry point for the CLI.
+    
+    Args:
+        args: Optional command-line arguments
+        
+    Returns:
+        Exit code
+    """
+    # Create argument parser
+    parser = argparse.ArgumentParser(
+        description='PACS DataBridge - County Import and Assessment Processing System'
+    )
+    
+    # Create subparsers for commands
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+    
+    # Import permits command
+    import_permits_parser = subparsers.add_parser('import-permits', help='Import building permits')
+    import_permits_parser.add_argument('file', help='Path to permit file')
+    import_permits_parser.add_argument('-o', '--output', help='Output file path')
+    import_permits_parser.add_argument('-s', '--save-to-db', action='store_true', help='Save to database')
+    
+    # Import personal property command
+    import_pp_parser = subparsers.add_parser('import-property', help='Import personal property')
+    import_pp_parser.add_argument('file', help='Path to personal property file')
+    import_pp_parser.add_argument('-o', '--output', help='Output file path')
+    import_pp_parser.add_argument('-s', '--save-to-db', action='store_true', help='Save to database')
+    
+    # Lookup parcel command
+    lookup_parser = subparsers.add_parser('lookup-parcel', help='Look up parcel')
+    lookup_group = lookup_parser.add_mutually_exclusive_group(required=True)
+    lookup_group.add_argument('-a', '--address', help='Address to look up')
+    lookup_group.add_argument('-p', '--parcel', help='Parcel number to look up')
+    lookup_parser.add_argument('-c', '--min-confidence', type=float, default=70.0, help='Minimum confidence score (0-100)')
+    
+    # Database setup command
+    db_parser = subparsers.add_parser('setup-database', help='Set up database')
+    
+    # Parse arguments
+    parsed_args = parser.parse_args(args)
+    
+    # No command specified, show help
+    if not parsed_args.command:
+        parser.print_help()
+        return 0
+    
+    # Load configuration
+    config = ConfigManager()
+    
+    # Set up logging
+    log_config = config.get('logging')
+    if log_config:
+        setup_logging(
+            level=log_config.get('level', 'INFO'),
+            log_file=log_config.get('log_file', None)
+        )
+    else:
+        setup_logging()
+    
+    # Execute command
+    if parsed_args.command == 'import-permits':
+        return import_permits(parsed_args, config)
+    elif parsed_args.command == 'import-property':
+        return import_personal_property(parsed_args, config)
+    elif parsed_args.command == 'lookup-parcel':
+        return lookup_parcel(parsed_args, config)
+    elif parsed_args.command == 'setup-database':
+        return setup_database(parsed_args, config)
+    else:
+        logger.error(f"Unknown command: {parsed_args.command}")
+        return 1
+
+
+def cli_main() -> None:
+    """Command-line entry point."""
+    sys.exit(main())
+
+
+if __name__ == '__main__':
+    cli_main()

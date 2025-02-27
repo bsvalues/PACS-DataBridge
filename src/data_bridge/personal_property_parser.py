@@ -472,3 +472,322 @@ if __name__ == "__main__":
     print("errors = property_data[property_data['validation_errors'] != '']")
     print("print(f'Found {len(errors)} records with validation errors')")
     print("print(errors[['business_name', 'validation_errors']])")
+"""
+Parser for personal property data from various file formats.
+"""
+
+import os
+import re
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PersonalPropertyParser:
+    """
+    Parser for personal property data from various sources and formats.
+    This class handles the importing, parsing, and standardization of personal property data.
+    """
+    
+    def __init__(self, field_mapping: Optional[Dict[str, str]] = None):
+        """
+        Initialize the personal property parser.
+        
+        Args:
+            field_mapping: Optional custom field mapping dictionary
+        """
+        # Default field mapping from common data sources to standardized field names
+        self.field_mapping = field_mapping or {
+            # Standard field names (lowercase)
+            'account_number': ['account_number', 'account #', 'account', 'acct no', 'acct #'],
+            'owner_name': ['owner_name', 'owner', 'business name', 'taxpayer', 'taxpayer name'],
+            'business_name': ['business_name', 'dba name', 'doing business as', 'business'],
+            'address': ['address', 'location address', 'situs address', 'property address'],
+            'mailing_address': ['mailing_address', 'mailing', 'taxpayer address', 'owner address'],
+            'value': ['value', 'assessed value', 'total value', 'market value'],
+            'property_type': ['property_type', 'type', 'category', 'classification'],
+            'year': ['year', 'tax year', 'assessment year', 'fiscal year']
+        }
+        
+        # Property type keywords for classification
+        self.property_types = {
+            'BUSINESS_EQUIPMENT': ['business equipment', 'equipment', 'machinery', 'computer', 'furniture'],
+            'INVENTORY': ['inventory', 'merchandise', 'stock', 'supplies'],
+            'LEASEHOLD_IMPROVEMENT': ['leasehold', 'improvement', 'fixture'],
+            'VEHICLE': ['vehicle', 'auto', 'car', 'truck', 'fleet'],
+            'AIRCRAFT': ['aircraft', 'airplane', 'aviation', 'helicopter'],
+            'WATERCRAFT': ['watercraft', 'boat', 'vessel', 'ship'],
+            'MOBILE_HOME': ['mobile home', 'manufactured home', 'trailer']
+        }
+    
+    def parse_file(self, file_path: Union[str, Path]) -> pd.DataFrame:
+        """
+        Parse personal property data from a file.
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            DataFrame with standardized personal property data
+        """
+        file_path = Path(file_path)
+        logger.info(f"Parsing personal property file: {file_path}")
+        
+        # Check file existence
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Determine file type and call appropriate parser
+        extension = file_path.suffix.lower()
+        
+        if extension == '.csv':
+            df = self._parse_csv(file_path)
+        elif extension in ['.xlsx', '.xls']:
+            df = self._parse_excel(file_path)
+        elif extension == '.json':
+            df = self._parse_json(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {extension}")
+        
+        # Standardize column names
+        df = self._standardize_columns(df)
+        
+        # Apply basic data cleaning
+        df = self._clean_data(df)
+        
+        # Add property type if missing
+        if 'property_type' not in df.columns:
+            df['property_type'] = self._classify_property_type(df)
+        
+        logger.info(f"Parsed {len(df)} personal property accounts")
+        return df
+    
+    def _parse_csv(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse CSV file to DataFrame.
+        
+        Args:
+            file_path: Path to CSV file
+            
+        Returns:
+            DataFrame with personal property data
+        """
+        try:
+            # Try different encodings and delimiters
+            try:
+                df = pd.read_csv(file_path, encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(file_path, encoding='latin1')
+                except:
+                    df = pd.read_csv(file_path, encoding='cp1252')
+            
+            # If DataFrame has only one column, try different delimiter
+            if len(df.columns) == 1:
+                for delimiter in [';', '|', '\t']:
+                    try:
+                        df = pd.read_csv(file_path, delimiter=delimiter)
+                        if len(df.columns) > 1:
+                            break
+                    except:
+                        pass
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing CSV file: {str(e)}")
+            raise
+    
+    def _parse_excel(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse Excel file to DataFrame.
+        
+        Args:
+            file_path: Path to Excel file
+            
+        Returns:
+            DataFrame with personal property data
+        """
+        try:
+            # First try with default sheet
+            try:
+                df = pd.read_excel(file_path)
+            except:
+                # Try to get sheet names and read first sheet
+                xls = pd.ExcelFile(file_path)
+                sheet_name = xls.sheet_names[0]
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing Excel file: {str(e)}")
+            raise
+    
+    def _parse_json(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse JSON file to DataFrame.
+        
+        Args:
+            file_path: Path to JSON file
+            
+        Returns:
+            DataFrame with personal property data
+        """
+        try:
+            df = pd.read_json(file_path)
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing JSON file: {str(e)}")
+            raise
+    
+    def _standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize column names based on field mapping.
+        
+        Args:
+            df: DataFrame with original column names
+            
+        Returns:
+            DataFrame with standardized column names
+        """
+        # Create a mapping from original column names to standardized names
+        column_mapping = {}
+        
+        for std_name, variations in self.field_mapping.items():
+            for col in df.columns:
+                # Check if column name matches any variation (case insensitive)
+                if col.lower() in variations or any(var in col.lower() for var in variations):
+                    column_mapping[col] = std_name
+                    break
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        return df
+    
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean and normalize data.
+        
+        Args:
+            df: DataFrame with personal property data
+            
+        Returns:
+            Cleaned DataFrame
+        """
+        # Make a copy to avoid modifying the original
+        df = df.copy()
+        
+        # Clean value - remove currency symbols and commas
+        if 'value' in df.columns:
+            df['value'] = df['value'].astype(str)
+            df['value'] = df['value'].str.replace('$', '', regex=False)
+            df['value'] = df['value'].str.replace(',', '', regex=False)
+            df['value'] = pd.to_numeric(df['value'], errors='coerce')
+        
+        # Clean addresses
+        for address_col in ['address', 'mailing_address']:
+            if address_col in df.columns:
+                df[address_col] = df[address_col].astype(str)
+                # Remove special characters and extra spaces
+                df[address_col] = df[address_col].str.replace(r'[^\w\s,.-]', '', regex=True)
+                df[address_col] = df[address_col].str.replace(r'\s+', ' ', regex=True)
+                df[address_col] = df[address_col].str.strip()
+        
+        # Clean names
+        for name_col in ['owner_name', 'business_name']:
+            if name_col in df.columns:
+                df[name_col] = df[name_col].astype(str)
+                df[name_col] = df[name_col].str.strip()
+        
+        # Fill missing values with empty strings for string columns
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('')
+        
+        return df
+    
+    def _classify_property_type(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Classify property type based on description or other fields.
+        
+        Args:
+            df: DataFrame with personal property data
+            
+        Returns:
+            Series with property types
+        """
+        # Initialize with default
+        property_types = pd.Series(['UNCLASSIFIED'] * len(df))
+        
+        # Look for description column that might contain type info
+        description_cols = [col for col in df.columns if 'description' in col.lower()]
+        
+        if description_cols:
+            desc_col = description_cols[0]
+            text_to_analyze = df[desc_col].str.lower()
+        elif 'property_type' in df.columns:
+            text_to_analyze = df['property_type'].str.lower()
+        else:
+            return property_types
+        
+        # Check for each property type
+        for i, text in enumerate(text_to_analyze):
+            if pd.isna(text) or text == '':
+                continue
+                
+            for prop_type, keywords in self.property_types.items():
+                if any(keyword in text for keyword in keywords):
+                    property_types.iloc[i] = prop_type
+                    break
+        
+        return property_types
+    
+    def extract_account_number(self, text: str) -> str:
+        """
+        Extract account number from text.
+        
+        Args:
+            text: Text that may contain an account number
+            
+        Returns:
+            Extracted account number or empty string
+        """
+        if not text:
+            return ''
+        
+        # Common account number patterns
+        patterns = [
+            r'account\s*#?\s*(\w[\w\-]+)',
+            r'acct\s*#?\s*(\w[\w\-]+)',
+            r'id\s*:?\s*(\w[\w\-]+)'
+        ]
+        
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                # Clean up the account number
+                account = match.group(1)
+                account = re.sub(r'[\-\s]', '', account)  # Remove hyphens and spaces
+                return account
+        
+        return ''
+    
+    def export_to_csv(self, df: pd.DataFrame, output_path: Union[str, Path]) -> str:
+        """
+        Export parsed personal property to CSV.
+        
+        Args:
+            df: DataFrame with personal property data
+            output_path: Path to output file
+            
+        Returns:
+            Path to exported file
+        """
+        output_path = Path(output_path)
+        df.to_csv(output_path, index=False)
+        logger.info(f"Exported {len(df)} personal property accounts to {output_path}")
+        return str(output_path)

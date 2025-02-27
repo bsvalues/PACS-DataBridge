@@ -167,7 +167,10 @@ response = requests.post(
 print(json.dumps(response.json(), indent=2))
 ```
 
-For detailed API documentation, navigate to `http://127.0.0.1:8000/docs` when the API server is running.
+#### API Documentation (Incomplete)
+
+*This section needs to be completed with detailed documentation for each endpoint, including request parameters, response formats, and examples.*
+
 
 ### Permit Data Import
 

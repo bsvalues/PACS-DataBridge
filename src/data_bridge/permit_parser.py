@@ -382,3 +382,342 @@ if __name__ == "__main__":
     # Extract improvement details
     improved_permits = parser.extract_improvement_details()
     print(f"Extracted improvement details for {len(improved_permits)} permits")
+"""
+Parser for building permit data from various file formats.
+"""
+
+import re
+import os
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PermitParser:
+    """
+    Parser for building permit data from various sources and formats.
+    This class handles the importing, parsing, and standardization of permit data.
+    """
+    
+    def __init__(self, field_mapping: Optional[Dict[str, str]] = None):
+        """
+        Initialize the permit parser.
+        
+        Args:
+            field_mapping: Optional custom field mapping dictionary
+        """
+        # Default field mapping from common data sources to standardized field names
+        self.field_mapping = field_mapping or {
+            # Standard field names (lowercase)
+            'permit_number': ['permit_number', 'permit #', 'permit', 'permit no', 'permit no.', 'permitnumber'],
+            'issue_date': ['issue_date', 'issued', 'date issued', 'issuedate'],
+            'description': ['description', 'desc', 'project description', 'work description'],
+            'address': ['address', 'project address', 'location', 'site address', 'property address'],
+            'valuation': ['valuation', 'value', 'project value', 'job value', 'construction value'],
+            'permit_type': ['permit_type', 'type', 'work type', 'project type'],
+            'status': ['status', 'permit status']
+        }
+        
+        # Define improvement type keywords
+        self.improvement_types = {
+            'NEW_CONSTRUCTION': ['new', 'new construction', 'new home', 'new house', 'new building'],
+            'ADDITION': ['addition', 'add', 'expand', 'extension'],
+            'REMODEL': ['remodel', 'renovation', 'rehab', 'repair', 'update', 'upgrade'],
+            'DECK': ['deck', 'patio', 'porch'],
+            'ROOF': ['roof', 'roofing', 'reroof'],
+            'POOL': ['pool', 'spa', 'hot tub'],
+            'HVAC': ['hvac', 'air conditioning', 'furnace', 'heating'],
+            'PLUMBING': ['plumbing', 'water heater', 'sewer', 'water line'],
+            'ELECTRICAL': ['electrical', 'wiring', 'panel'],
+            'DEMOLITION': ['demolition', 'demo', 'remove', 'tear down'],
+            'TENANT_IMPROVEMENT': ['tenant improvement', 'ti ', 'tenant ', 'tenant finish']
+        }
+    
+    def parse_file(self, file_path: Union[str, Path]) -> pd.DataFrame:
+        """
+        Parse permit data from a file.
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            DataFrame with standardized permit data
+        """
+        file_path = Path(file_path)
+        logger.info(f"Parsing permit file: {file_path}")
+        
+        # Check file existence
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Determine file type and call appropriate parser
+        extension = file_path.suffix.lower()
+        
+        if extension == '.csv':
+            df = self._parse_csv(file_path)
+        elif extension in ['.xlsx', '.xls']:
+            df = self._parse_excel(file_path)
+        elif extension == '.json':
+            df = self._parse_json(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {extension}")
+        
+        # Standardize column names
+        df = self._standardize_columns(df)
+        
+        # Apply basic data cleaning
+        df = self._clean_data(df)
+        
+        # Standardize dates
+        df = self._standardize_dates(df)
+        
+        # Add improvement type if missing
+        if 'improvement_type' not in df.columns:
+            df['improvement_type'] = self.extract_improvement_type(df)
+        
+        logger.info(f"Parsed {len(df)} permits")
+        return df
+    
+    def _parse_csv(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse CSV file to DataFrame.
+        
+        Args:
+            file_path: Path to CSV file
+            
+        Returns:
+            DataFrame with permit data
+        """
+        try:
+            # Try different encodings and delimiters
+            try:
+                df = pd.read_csv(file_path, encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(file_path, encoding='latin1')
+                except:
+                    df = pd.read_csv(file_path, encoding='cp1252')
+            
+            # If DataFrame has only one column, try different delimiter
+            if len(df.columns) == 1:
+                for delimiter in [';', '|', '\t']:
+                    try:
+                        df = pd.read_csv(file_path, delimiter=delimiter)
+                        if len(df.columns) > 1:
+                            break
+                    except:
+                        pass
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing CSV file: {str(e)}")
+            raise
+    
+    def _parse_excel(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse Excel file to DataFrame.
+        
+        Args:
+            file_path: Path to Excel file
+            
+        Returns:
+            DataFrame with permit data
+        """
+        try:
+            # First try with default sheet
+            try:
+                df = pd.read_excel(file_path)
+            except:
+                # Try to get sheet names and read first sheet
+                xls = pd.ExcelFile(file_path)
+                sheet_name = xls.sheet_names[0]
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+            
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing Excel file: {str(e)}")
+            raise
+    
+    def _parse_json(self, file_path: Path) -> pd.DataFrame:
+        """
+        Parse JSON file to DataFrame.
+        
+        Args:
+            file_path: Path to JSON file
+            
+        Returns:
+            DataFrame with permit data
+        """
+        try:
+            df = pd.read_json(file_path)
+            return df
+        except Exception as e:
+            logger.error(f"Error parsing JSON file: {str(e)}")
+            raise
+    
+    def _standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize column names based on field mapping.
+        
+        Args:
+            df: DataFrame with original column names
+            
+        Returns:
+            DataFrame with standardized column names
+        """
+        # Create a mapping from original column names to standardized names
+        column_mapping = {}
+        
+        for std_name, variations in self.field_mapping.items():
+            for col in df.columns:
+                # Check if column name matches any variation (case insensitive)
+                if col.lower() in variations or any(var in col.lower() for var in variations):
+                    column_mapping[col] = std_name
+                    break
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        return df
+    
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean and normalize data.
+        
+        Args:
+            df: DataFrame with permit data
+            
+        Returns:
+            Cleaned DataFrame
+        """
+        # Make a copy to avoid modifying the original
+        df = df.copy()
+        
+        # Clean valuation - remove currency symbols and commas
+        if 'valuation' in df.columns:
+            df['valuation'] = df['valuation'].astype(str)
+            df['valuation'] = df['valuation'].str.replace('$', '', regex=False)
+            df['valuation'] = df['valuation'].str.replace(',', '', regex=False)
+            df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce')
+        
+        # Clean address
+        if 'address' in df.columns:
+            df['address'] = df['address'].astype(str)
+            # Remove special characters and extra spaces
+            df['address'] = df['address'].str.replace(r'[^\w\s,.-]', '', regex=True)
+            df['address'] = df['address'].str.replace(r'\s+', ' ', regex=True)
+            df['address'] = df['address'].str.strip()
+        
+        # Fill missing values with empty strings for string columns
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('')
+        
+        return df
+    
+    def _standardize_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize date formats.
+        
+        Args:
+            df: DataFrame with permit data
+            
+        Returns:
+            DataFrame with standardized dates
+        """
+        # Standardize issue_date to ISO format (YYYY-MM-DD)
+        if 'issue_date' in df.columns:
+            # Convert to datetime
+            df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
+            
+            # Convert to ISO format string
+            df['issue_date'] = df['issue_date'].dt.strftime('%Y-%m-%d')
+            
+            # Replace NaT with empty string
+            df['issue_date'] = df['issue_date'].fillna('')
+        
+        return df
+    
+    def extract_improvement_type(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Extract improvement type from description.
+        
+        Args:
+            df: DataFrame with permit data
+            
+        Returns:
+            Series with improvement types
+        """
+        # Initialize with default
+        improvement_types = pd.Series(['OTHER'] * len(df))
+        
+        if 'description' in df.columns and 'permit_type' in df.columns:
+            # Combine description and permit_type for better detection
+            text_to_analyze = df['description'].str.lower() + ' ' + df['permit_type'].str.lower()
+        elif 'description' in df.columns:
+            text_to_analyze = df['description'].str.lower()
+        elif 'permit_type' in df.columns:
+            text_to_analyze = df['permit_type'].str.lower()
+        else:
+            return improvement_types
+        
+        # Check for each improvement type
+        for i, text in enumerate(text_to_analyze):
+            for imp_type, keywords in self.improvement_types.items():
+                if any(keyword in text for keyword in keywords):
+                    improvement_types.iloc[i] = imp_type
+                    break
+        
+        return improvement_types
+    
+    def extract_parcel_number(self, text: str) -> str:
+        """
+        Extract parcel number from text.
+        
+        Args:
+            text: Text that may contain a parcel number
+            
+        Returns:
+            Extracted parcel number or empty string
+        """
+        if not text:
+            return ''
+        
+        # Common parcel number patterns
+        patterns = [
+            r'parcel\s*#?\s*(\d[\d\-]+)',
+            r'apn\s*:?\s*(\d[\d\-]+)',
+            r'parcel\s*id\s*:?\s*(\d[\d\-]+)',
+            r'pin\s*:?\s*(\d[\d\-]+)',
+            r'tax\s*id\s*:?\s*(\d[\d\-]+)'
+        ]
+        
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                # Clean up the parcel number
+                parcel = match.group(1)
+                parcel = re.sub(r'[\-\s]', '', parcel)  # Remove hyphens and spaces
+                return parcel
+        
+        return ''
+    
+    def export_to_csv(self, df: pd.DataFrame, output_path: Union[str, Path]) -> str:
+        """
+        Export parsed permits to CSV.
+        
+        Args:
+            df: DataFrame with permit data
+            output_path: Path to output file
+            
+        Returns:
+            Path to exported file
+        """
+        output_path = Path(output_path)
+        df.to_csv(output_path, index=False)
+        logger.info(f"Exported {len(df)} permits to {output_path}")
+        return str(output_path)

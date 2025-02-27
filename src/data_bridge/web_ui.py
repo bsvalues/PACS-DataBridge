@@ -479,6 +479,59 @@ def render_configuration():
             key="db_password"
         )
     
+    # Save button
+    if st.button("Save Configuration"):
+        # Update PACS configuration
+        pacs_config = {
+            'server': pacs_server,
+            'database': pacs_database,
+            'trusted_connection': pacs_trusted
+        }
+        
+        if not pacs_trusted:
+            pacs_config['username'] = pacs_username
+            pacs_config['password'] = pacs_password
+        
+        # Update DataBridge configuration
+        db_config = {
+            'server': db_server, Database")
+    db_config = config.get('database', 'databridge') or {}
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        db_server = st.text_input(
+            "Server",
+            value=db_config.get('server', 'localhost'),
+            key="db_server"
+        )
+        db_database = st.text_input(
+            "Database",
+            value=db_config.get('database', 'DataBridge'),
+            key="db_database"
+        )
+    
+    with col2:
+        db_trusted = st.checkbox(
+            "Use Trusted Connection",
+            value=db_config.get('trusted_connection', True),
+            key="db_trusted"
+        )
+        
+        db_username = st.text_input(
+            "Username",
+            value=db_config.get('username', ''),
+            disabled=db_trusted,
+            key="db_username"
+        )
+        
+        db_password = st.text_input(
+            "Password",
+            value=db_config.get('password', ''),
+            type="password",
+            disabled=db_trusted,
+            key="db_password"
+        )
+    
     # Save configuration
     if st.button("Save Configuration"):
         # PACS database config
